@@ -1,5 +1,7 @@
 from selenium import webdriver
 from selenium.webdriver.common.by import By
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
 from bs4 import BeautifulSoup
 import pandas as pd
 
@@ -10,11 +12,12 @@ def scrape_doctor_info(url):
     driver.get(url)
 
     # Wait for the page to load (optional)
-    # You might need to add explicit waits here if the page takes time to load
-    # Example:
-    # from selenium.webdriver.support.ui import WebDriverWait
-    # from selenium.webdriver.support import expected_conditions as EC
-    # WebDriverWait(driver, 10).until(EC.presence_of_element_located((By.CLASS_NAME, 'my-target-class')))
+    try:
+        WebDriverWait(driver, 10).until(EC.presence_of_element_located((By.ID, 'CompanyNameLbl')))
+    except:
+        print(f"Error loading page: {url}")
+        driver.quit()
+        return None, None, None, None, None, None, None
 
     soup = BeautifulSoup(driver.page_source, 'html.parser')
 
@@ -58,6 +61,10 @@ def main():
 
     doctor_data = []
     for url in urls:
+        # Skip blank lines
+        if not url:
+            continue
+
         name, address, profession, phone, mobile, website, email = scrape_doctor_info(url)
         if name:
             doctor_data.append([name, address, profession, phone, mobile, website, email])
