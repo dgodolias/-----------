@@ -9,10 +9,8 @@ import pandas as pd
 import threading
 import time
 
-def scrape_doctor_info(url):
-    """Scrapes doctor information from a given URL using Selenium."""
-
-    # Configure Chrome options for headless browsing
+def init_driver():
+    """Initialize the Chrome driver with headless options."""
     chrome_options = Options()
     chrome_options.add_argument("--headless=new")
     chrome_options.add_argument("--disable-gpu")
@@ -24,21 +22,20 @@ def scrape_doctor_info(url):
     chrome_options.add_argument("window-size=1920,1080")
     chrome_options.add_argument("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36")
 
-    # Specify the path to chromedriver.exe (downloaded earlier)
-    chrome_driver_path = './chromedriver-win64/chromedriver.exe'  # Relative path example
+    chrome_driver_path = './chromedriver-win64/chromedriver.exe'  # Adjust the path to your chromedriver
+    return webdriver.Chrome(service=Service(chrome_driver_path), options=chrome_options)
 
-    # Initialize the Chrome driver
-    driver = webdriver.Chrome(service=Service(chrome_driver_path), options=chrome_options)
-
+def scrape_doctor_info(url):
+    """Scrapes doctor information from a given URL using Selenium."""
+    driver = init_driver()
     driver.get(url)
 
-    # Wait for the page to load (optional)
     try:
         WebDriverWait(driver, 10).until(EC.presence_of_element_located((By.ID, 'CompanyNameLbl')))
     except Exception as e:
         print(f"Error loading page: {url}\n{e}")
         driver.quit()
-        return None, None, None, None, None, None, None
+        return None, None, None, None, None, None
 
     time.sleep(2)  # Add a delay to mimic real user behavior
 
@@ -64,25 +61,21 @@ def scrape_doctor_info(url):
     mobile_element = soup.find('label', id='MobileContLbl')
     mobile = mobile_element.span.text.strip() if mobile_element else None
 
-    # Extract website
-    website_element = soup.find('a', class_='rc_Detaillink', href=True, itemprop='url')
-    website = website_element['href'] if website_element else None
-
     # Extract email
     email_element = soup.find('a', rel='nofollow', class_='rc_Detaillink', href=True)
     email = email_element['href'].replace('mailto:', '') if email_element else None
 
     driver.quit()  # Close the browser
 
-    return name, address, profession, phone, mobile, website, email
+    return name, address, profession, phone, mobile, email
 
 def scrape_and_append(url, df):
     """Scrapes doctor information and appends it to the doctor_data list if not a duplicate."""
     global doctor_data
-    name, address, profession, phone, mobile, website, email = scrape_doctor_info(url)
+    name, address, profession, phone, mobile, email = scrape_doctor_info(url)
 
     if name and not check_phone_exists(df, phone, mobile):
-        doctor_data.append([name, address, profession, phone, mobile, website, email])
+        doctor_data.append([name, address, profession, phone, mobile, email, ""])  # Add blank Ωρα column
 
 def check_phone_exists(df, phone, mobile):
     """Check if the phone or mobile number already exists in the DataFrame."""
@@ -90,8 +83,25 @@ def check_phone_exists(df, phone, mobile):
     mobile = str(mobile)
     return ((df["Phone"].astype(str) == phone) | (df["Mobile"].astype(str) == mobile)).any()
 
+def get_doctor_links(driver, search_type, search_location):
+    """Get doctor links from vrisko.gr based on search type and location."""
+    url = f"https://www.vrisko.gr/search/{search_type}/{search_location}"
+    driver.get(url)
+
+    soup = BeautifulSoup(driver.page_source, 'html.parser')
+    doctor_links = []
+    
+    for div in soup.find_all('div', class_='AdvAreaRight'):
+        website_link = div.find('a', class_='urlClickLoggingClass', target='_blank')
+        if not website_link:
+            more_link = div.find('a', class_='AdvAreaBottomRight')
+            if more_link:
+                doctor_links.append(more_link['href'])
+
+    return doctor_links
+
 def main():
-    """Reads URLs from a file, scrapes doctor information, and writes it to an Excel file."""
+    """Reads profession and area, scrapes doctor information, and writes it to an Excel file."""
 
     global doctor_data
     doctor_data = []
@@ -102,17 +112,26 @@ def main():
         doctor_data = df.values.tolist()
     except FileNotFoundError:
         # File not found, create an empty DataFrame with the expected columns
-        df = pd.DataFrame(columns=['Name', 'Address', 'Profession', 'Phone', 'Mobile', 'Website', 'Email'])
+        df = pd.DataFrame(columns=['Name', 'Address', 'Profession', 'Phone', 'Mobile', 'Email', 'Ωρα'])
 
-    with open('urls.txt', 'r') as f:
-        urls = [line.strip() for line in f]
-    urls = set(urls)
+    # Initialize the web driver
+    driver = init_driver()
+
+    # Get user input for search type and location
+    search_type = input("Enter the type of doctor (in Greek, e.g., Ορθοδοντικοί): ")
+    search_location = input("Enter the location (in Greek, e.g., Αττική): ")
+
+    # Get the list of doctor links
+    doctor_links = get_doctor_links(driver, search_type, search_location)
+
+    # Quit the initial driver used to get links
+    driver.quit()
 
     # Limit the number of threads to 8
     max_threads = 8
     active_threads = []
 
-    for url in urls:
+    for url in doctor_links:
         # Skip blank lines
         if not url:
             continue
@@ -133,7 +152,7 @@ def main():
         thread.join()
 
     # Convert the updated list back to a DataFrame
-    updated_df = pd.DataFrame(doctor_data, columns=['Name', 'Address', 'Profession', 'Phone', 'Mobile', 'Website', 'Email'])
+    updated_df = pd.DataFrame(doctor_data, columns=['Name', 'Address', 'Profession', 'Phone', 'Mobile', 'Email', 'Ωρα'])
 
     # Append new data to the existing DataFrame and drop duplicates
     df = pd.concat([df, updated_df]).drop_duplicates(subset=['Phone', 'Mobile'], keep='first')
