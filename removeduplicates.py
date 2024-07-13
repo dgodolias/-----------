@@ -91,7 +91,7 @@ def find_and_delete_duplicates(file_path, phone_column_name, mobile_column_name)
     wb.save(file_path)
     print("Workbook saved. Duplicates removed.")
 
-file_path = 'EVAGGELIO.xlsx'
+file_path = 'doctor_info.xlsx'
 phone_column_name = 'Phone'
 mobile_column_name = 'Mobile'
 
