@@ -65,9 +65,10 @@ def scrape_doctor_info(url):
     email_element = soup.find('a', rel='nofollow', class_='rc_Detaillink', href=True)
     email = email_element['href'].replace('mailto:', '') if email_element else None
 
-    driver.quit()  # Close the browser
+    driver.quit()  # Close the browser tab
 
     return name, address, profession, phone, mobile, email
+
 
 def scrape_and_append(url, df):
     """Scrapes doctor information and appends it to the doctor_data list if not a duplicate."""
@@ -83,12 +84,18 @@ def check_phone_exists(df, phone, mobile):
     mobile = str(mobile)
     return ((df["Phone"].astype(str) == phone) | (df["Mobile"].astype(str) == mobile)).any()
 
-def get_doctor_links(driver, search_type, search_location):
+def get_doctor_links(driver, search_type, search_location, page):
     """Get doctor links from vrisko.gr based on search type and location."""
-    url = f"https://www.vrisko.gr/search/{search_type}/{search_location}"
+    url = f"https://www.vrisko.gr/search/{search_type}/{search_location}/?page={page}"
     driver.get(url)
 
     soup = BeautifulSoup(driver.page_source, 'html.parser')
+    
+    # Check for the presence of the results count element
+    main_count_title = soup.find('span', class_='mainCountTitle')
+    if not main_count_title or "Βρέθηκαν 272 αποτελέσματα" not in main_count_title.text:
+        return []  # No more results found, return empty list
+
     doctor_links = []
     
     for div in soup.find_all('div', class_='AdvAreaRight'):
@@ -99,6 +106,7 @@ def get_doctor_links(driver, search_type, search_location):
                 doctor_links.append(more_link['href'])
 
     return doctor_links
+
 
 def main():
     """Reads profession and area, scrapes doctor information, and writes it to an Excel file."""
@@ -121,35 +129,42 @@ def main():
     search_type = input("Enter the type of doctor (in Greek, e.g., Ορθοδοντικοί): ")
     search_location = input("Enter the location (in Greek, e.g., Αττική): ")
 
-    # Get the list of doctor links
-    doctor_links = get_doctor_links(driver, search_type, search_location)
+    # Loop through pages until no more links are found
+    page = 1
+    while True:
+        print(f"Scraping page {page}...")
+        doctor_links = get_doctor_links(driver, search_type, search_location, page)
+        if not doctor_links:
+            break  # No more results found, exit the loop
 
-    # Quit the initial driver used to get links
+        # Limit the number of threads to 8
+        max_threads = 8
+        active_threads = []
+
+        for url in doctor_links:
+            # Skip blank lines
+            if not url:
+                continue
+
+            # Wait for an available thread slot
+            while len(active_threads) >= max_threads:
+                for thread in active_threads:
+                    if not thread.is_alive():
+                        active_threads.remove(thread)
+                time.sleep(0.1)
+
+            thread = threading.Thread(target=scrape_and_append, args=(url, df))
+            active_threads.append(thread)
+            thread.start()
+
+        # Wait for all threads to finish
+        for thread in active_threads:
+            thread.join()
+
+        page += 1
+
+    # Quit the driver after scraping all pages
     driver.quit()
-
-    # Limit the number of threads to 8
-    max_threads = 8
-    active_threads = []
-
-    for url in doctor_links:
-        # Skip blank lines
-        if not url:
-            continue
-
-        # Wait for an available thread slot
-        while len(active_threads) >= max_threads:
-            for thread in active_threads:
-                if not thread.is_alive():
-                    active_threads.remove(thread)
-            time.sleep(0.1)
-
-        thread = threading.Thread(target=scrape_and_append, args=(url, df))
-        active_threads.append(thread)
-        thread.start()
-
-    # Wait for all threads to finish
-    for thread in active_threads:
-        thread.join()
 
     # Convert the updated list back to a DataFrame
     updated_df = pd.DataFrame(doctor_data, columns=['Name', 'Address', 'Profession', 'Phone', 'Mobile', 'Email', 'Ωρα'])
@@ -159,6 +174,7 @@ def main():
 
     df.to_excel('doctor_info.xlsx', index=False)
     print("Data appended to doctor_info.xlsx")
+
 
 if __name__ == '__main__':
     main()
