@@ -8,6 +8,7 @@ from bs4 import BeautifulSoup
 import pandas as pd
 import threading
 import time
+import psutil
 
 def init_driver():
     """Initialize the Chrome driver with headless options."""
@@ -22,60 +23,75 @@ def init_driver():
     chrome_options.add_argument("window-size=1920,1080")
     chrome_options.add_argument("user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36")
 
-    chrome_driver_path = './chromedriver-win64/chromedriver.exe'  # Adjust the path to your chromedriver
-    return webdriver.Chrome(service=Service(chrome_driver_path), options=chrome_options)
+    return webdriver.Chrome(options=chrome_options)
+
+def get_current_chrome_processes():
+    """Get the list of current Chrome process PIDs."""
+    chrome_pids = []
+    for proc in psutil.process_iter(['pid', 'name']):
+        if proc.info['name'] in ('chrome.exe', 'chromedriver.exe'):
+            chrome_pids.append(proc.info['pid'])
+    return set(chrome_pids)
+
+def kill_new_chrome_processes(initial_pids):
+    """Kill Chrome processes that were started after the initial process scan."""
+    current_pids = get_current_chrome_processes()
+    new_pids = current_pids - initial_pids
+    for pid in new_pids:
+        try:
+            proc = psutil.Process(pid)
+            proc.kill()
+        except psutil.NoSuchProcess:
+            pass
 
 def scrape_doctor_info(url):
     """Scrapes doctor information from a given URL using Selenium."""
     driver = init_driver()
-    driver.get(url)
-
     try:
+        driver.get(url)
         WebDriverWait(driver, 10).until(EC.presence_of_element_located((By.ID, 'CompanyNameLbl')))
+        time.sleep(2)  # Add a delay to mimic real user behavior
+
+        soup = BeautifulSoup(driver.page_source, 'html.parser')
+
+        # Extract doctor's name
+        name_element = soup.find('label', id='CompanyNameLbl', class_='companyLabel_class', itemprop='name')
+        name = name_element.span.text.strip() if name_element else None
+
+        # Extract address
+        address_element = soup.find('label', id='AddressLbl')
+        address = address_element.text.strip() if address_element else None
+
+        # Extract profession
+        profession_element = soup.find('label', id='ProfessionLbl', itemprop='description')
+        profession = profession_element.text.strip() if profession_element else None
+
+        # Extract phone number
+        phone_element = soup.find('label', class_='rc_firstphone')
+        phone = phone_element.text.strip() if phone_element else None
+
+        # Extract mobile number
+        mobile_element = soup.find('label', id='MobileContLbl')
+        mobile = mobile_element.span.text.strip() if mobile_element else None
+
+        # Extract email
+        email_element = soup.find('a', rel='nofollow', class_='rc_Detaillink', href=True)
+        email = email_element['href'].replace('mailto:', '') if email_element else None
+
+        return name, address, profession, phone, mobile, email
     except Exception as e:
         print(f"Error loading page: {url}\n{e}")
-        driver.quit()
         return None, None, None, None, None, None
+    finally:
+        driver.quit()
+        time.sleep(2)  # Ensure driver.quit() has time to close the browser
 
-    time.sleep(2)  # Add a delay to mimic real user behavior
-
-    soup = BeautifulSoup(driver.page_source, 'html.parser')
-
-    # Extract doctor's name
-    name_element = soup.find('label', id='CompanyNameLbl', class_='companyLabel_class', itemprop='name')
-    name = name_element.span.text.strip() if name_element else None
-
-    # Extract address
-    address_element = soup.find('label', id='AddressLbl')
-    address = address_element.text.strip() if address_element else None
-
-    # Extract profession
-    profession_element = soup.find('label', id='ProfessionLbl', itemprop='description')
-    profession = profession_element.text.strip() if profession_element else None
-
-    # Extract phone number
-    phone_element = soup.find('label', class_='rc_firstphone')
-    phone = phone_element.text.strip() if phone_element else None
-
-    # Extract mobile number
-    mobile_element = soup.find('label', id='MobileContLbl')
-    mobile = mobile_element.span.text.strip() if mobile_element else None
-
-    # Extract email
-    email_element = soup.find('a', rel='nofollow', class_='rc_Detaillink', href=True)
-    email = email_element['href'].replace('mailto:', '') if email_element else None
-
-    driver.quit()  # Close the browser
-
-    return name, address, profession, phone, mobile, email
-
-def scrape_and_append(url, df):
+def scrape_and_append(url, df, lock):
     """Scrapes doctor information and appends it to the doctor_data list if not a duplicate."""
-    global doctor_data
     name, address, profession, phone, mobile, email = scrape_doctor_info(url)
-
     if name and not check_phone_exists(df, phone, mobile):
-        doctor_data.append([name, address, profession, phone, mobile, email, ""])  # Add blank Ωρα column
+        with lock:
+            doctor_data.append([name, address, profession, phone, mobile, email, ""])  # Add blank Ωρα column
 
 def check_phone_exists(df, phone, mobile):
     """Check if the phone or mobile number already exists in the DataFrame."""
@@ -102,9 +118,11 @@ def get_doctor_links(driver, search_type, search_location):
 
 def main():
     """Reads profession and area, scrapes doctor information, and writes it to an Excel file."""
-
     global doctor_data
     doctor_data = []
+    lock = threading.Lock()
+
+    initial_chrome_pids = get_current_chrome_processes()
 
     try:
         # Attempt to read existing data from the Excel file
@@ -126,6 +144,7 @@ def main():
 
     # Quit the initial driver used to get links
     driver.quit()
+    time.sleep(2)  # Ensure driver.quit() has time to close the browser
 
     # Limit the number of threads to 8
     max_threads = 8
@@ -143,7 +162,7 @@ def main():
                     active_threads.remove(thread)
             time.sleep(0.1)
 
-        thread = threading.Thread(target=scrape_and_append, args=(url, df))
+        thread = threading.Thread(target=scrape_and_append, args=(url, df, lock))
         active_threads.append(thread)
         thread.start()
 
@@ -159,6 +178,8 @@ def main():
 
     df.to_excel('doctor_info.xlsx', index=False)
     print("Data appended to doctor_info.xlsx")
+
+    kill_new_chrome_processes(initial_chrome_pids)  # Ensure only new processes are killed
 
 if __name__ == '__main__':
     main()
